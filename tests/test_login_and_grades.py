@@ -11,40 +11,63 @@ async def test_login_and_check_grades():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
         page = await browser.new_page()
-        login_page = LoginPage(page)
-        grade_history_page = GradeHistoryPage(page)
-
         try:
-            await login_page.goto(config.BASE_URL)
-            await login_page.login(config.USERNAME, config.PASSWORD)
-
-            await page.goto("https://vtop.vitap.ac.in/vtop/content?")
-            # Click the second '' button
-            await page.get_by_role("button", name="").nth(1).click()
-
-            # Try to click the first visible 'Examination' button
-            examination_buttons = page.locator("button:has-text('Examination')")
-            count = await examination_buttons.count()
-            clicked = False
-            for i in range(count):
-                btn = examination_buttons.nth(i)
-                if await btn.is_visible():
-                    await btn.click(force=True)
-                    clicked = True
+            await page.goto("https://vtop.vitap.ac.in/vtop/login")
+            await page.get_by_role("link", name="Student ").click()
+            await page.goto("https://vtop.vitap.ac.in/vtop/login")
+            await page.get_by_role("textbox", name="Username").click()
+            await page.get_by_role("textbox", name="Username").fill(config.USERNAME)
+            await page.get_by_role("textbox", name="Password").click()
+            await page.get_by_role("textbox", name="Password").fill(config.PASSWORD)
+            # Try to get the CAPTCHA textbox, reload if not found
+            captcha_found = False
+            for attempt in range(10):
+                try:
+                    await page.get_by_role("textbox", name="Enter CAPTCHA shown above").wait_for(state="visible", timeout=3000)
+                    captcha_found = True
                     break
-            if not clicked:
-                log("No visible 'Examination' button found. Trying to click 'Grade History' link directly.")
-
-            # Click the correct 'Grade History' link (second match, sidebar)
-            grade_history_locator = page.locator("a[data-url='examinations/examGradeView/StudentGradeHistory']").nth(1)
-            await grade_history_locator.wait_for(state="visible", timeout=20000)
-            await grade_history_locator.click()
-            # Wait for popup and click print button
-            page1_promise = page.wait_for_event("popup")
+                except Exception:
+                    log(f"Captcha textbox not found, reloading login page (attempt {attempt+1})...")
+                    await page.reload()
+                    await page.get_by_role("textbox", name="Username").click()
+                    await page.get_by_role("textbox", name="Username").fill(config.USERNAME)
+                    await page.get_by_role("textbox", name="Password").click()
+                    await page.get_by_role("textbox", name="Password").fill(config.PASSWORD)
+            if not captcha_found:
+                raise Exception("Captcha textbox did not appear after several reloads.")
+            await page.get_by_role("textbox", name="Enter CAPTCHA shown above").click()
+            log("Please manually enter the captcha in the browser and click Submit/Login. The script will proceed automatically after you log in.")
+            # Wait for user to submit/login manually
+            # Wait for navigation to indicate login success
+            await page.wait_for_url("**/vtop/content?*", timeout=120000)
+            await page.get_by_role("button", name="☰").click()
+            await page.get_by_role("button", name=" Examination").click()
+            await page.get_by_role("link", name=" Grade History").click()
+            import time
+            time.sleep(10)  # Wait for 10 seconds to allow Grade History to load
+            await page.get_by_role("button", name="Close").click()
+            # Listen for new tab (context.on("page"))
+            new_page = None
+            async def handle_new_page(page_obj):
+                nonlocal new_page
+                new_page = page_obj
+            page.context.on("page", handle_new_page)
             await page.locator("#printVTOPCoreDocument").click()
-            page1 = await page1_promise
-            # Right click on 'Fundamentals of Electrical' cell in popup
-            await page1.get_by_role("cell", name="Fundamentals of Electrical").click(button="right")
+            # Wait for the new tab to open
+            for _ in range(30):
+                if new_page:
+                    break
+                import asyncio
+                await asyncio.sleep(1)
+            if new_page:
+                log(f"New tab opened with URL: {new_page.url}")
+                # Wait for the new tab to finish loading
+                await new_page.wait_for_load_state("networkidle", timeout=30000)
+                pdf_path = "LaasyaVundavalli_GradeHistory.pdf"
+                await new_page.pdf(path=pdf_path)
+                log(f"PDF downloaded as {pdf_path}")
+            else:
+                error("New tab did not open after clicking print button.")
             log("Test completed successfully")
         except Exception as e:
             error(f"Test failed: {e}")
